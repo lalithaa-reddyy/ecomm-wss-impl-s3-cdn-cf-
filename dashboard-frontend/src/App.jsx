@@ -1,7 +1,7 @@
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
-const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
+const WS_ENDPOINT = import.meta.env.VITE_WS_ENDPOINT;
 const REFRESH_MS = 3000;
 
 // Colors for event types
@@ -431,25 +431,53 @@ export default function App() {
   const [activeTab,     setActiveTab]     = useState("overview");
   const [countdown,     setCountdown]     = useState(REFRESH_MS / 1000);
 
-  const fetchMetrics = async () => {
-    try {
-      const res = await fetch(`${API_ENDPOINT}/stream`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setMetrics(data);
-      setLastUpdate(new Date().toLocaleTimeString());
-      setError(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setIsInitialLoad(false);
+  const wsRef        = useRef(null);
+  const intervalRef  = useRef(null);
+  const reconnectRef = useRef(null);
+
+  const requestMetrics = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action: "getMetrics" }));
     }
   };
 
   useEffect(() => {
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, REFRESH_MS);
-    return () => clearInterval(interval);
+    const connect = () => {
+      const ws = new WebSocket(WS_ENDPOINT);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setError(null);
+        requestMetrics();
+        intervalRef.current = setInterval(requestMetrics, REFRESH_MS);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setMetrics(data);
+          setLastUpdate(new Date().toLocaleTimeString());
+          setError(null);
+          setIsInitialLoad(false);
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      ws.onerror = () => setError("WebSocket error - retrying...");
+
+      ws.onclose = () => {
+        clearInterval(intervalRef.current);
+        reconnectRef.current = setTimeout(connect, 3000);
+      };
+    };
+
+    connect();
+    return () => {
+      clearInterval(intervalRef.current);
+      clearTimeout(reconnectRef.current);
+      wsRef.current?.close();
+    };
   }, []);
 
   // Simple countdown timer
@@ -464,7 +492,7 @@ export default function App() {
     return (
       <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", color:"#718096", flexDirection:"column", gap:10 }}>
         <div style={{ fontSize:22 }}>Connecting to dashboard...</div>
-        <div style={{ fontSize:12 }}>{API_ENDPOINT}/stream</div>
+        <div style={{ fontSize:12 }}>Waiting for WebSocket connection...</div>
       </div>
     );
   }
@@ -499,11 +527,6 @@ export default function App() {
         </div>
       </div>
 
-      {error && (
-        <div style={{ background:"#2d1515", border:"1px solid #c53030", borderRadius:10, padding:"11px 14px", marginBottom:14, color:"#fc8181", fontSize:13 }}>
-          ERROR: {error}
-        </div>
-      )}
 
       <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:22, borderBottom:"1px solid #2d3748" }}>
         {TABS.map(tab => (
@@ -527,7 +550,7 @@ export default function App() {
       {renderPanel()}
 
       <div style={{ marginTop:28, fontSize:11, color:"#2d3748", textAlign:"right" }}>
-        Last updated: {lastUpdate || "-"} - API Endpoint: {API_ENDPOINT}/stream
+        Last updated: {lastUpdate || "-"} - WebSocket: {WS_ENDPOINT}
       </div>
     </div>
   );

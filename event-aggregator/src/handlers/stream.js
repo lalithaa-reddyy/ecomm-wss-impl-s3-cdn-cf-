@@ -10,12 +10,8 @@ const TABLE = process.env.AGG_TABLE;
 const TOPIC = process.env.SNS_TOPIC_ARN;
 const RAW_BUCKET = process.env.RAW_BUCKET; // S3 bucket for raw events
 const AGG_BUCKET = process.env.AGG_BUCKET; // S3 bucket for aggregations
-
-// Batch write optimization - flush every 25 updates (DynamoDB limit is 25 per batch)
-const BATCH_SIZE = 25;
 const MAX_RETRIES = 3;
 
-/* ============ FAST SINGLE-PASS AGGREGATION ============ */
 function aggregateEvents(records) {
   const aggregations = {
     countsByMinute: {},
@@ -145,7 +141,7 @@ async function updateDynamoDBBatched(aggregations) {
   const updateRequests = [];
 
   // Helper to build update request
-  const buildUpdateRequest = (id, deltas) => {
+  const buildUpdateRequest = (id, deltas) => {//id like cat#home , deltas are the counts
     const exprNames = {};
     const exprValues = {};
     const addParts = [];

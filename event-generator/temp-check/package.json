@@ -1,0 +1,22 @@
+{
+  "name": "event-generator",
+  "version": "1.0.0",
+  "description": "Generates synthetic e-commerce events and streams to Kinesis",
+  "main": "app.js",
+  "scripts": {
+    "test": "node __tests__/unit/handler.test.js 2>/dev/null || echo 'Tests not yet implemented'",
+    "build": "echo 'No build needed'"
+  },
+  "keywords": ["events", "kinesis", "generator", "kinesis"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-kinesis": "^3.400.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
+
+

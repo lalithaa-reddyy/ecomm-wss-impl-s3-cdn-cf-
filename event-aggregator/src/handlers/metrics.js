@@ -4,20 +4,6 @@ const { DynamoDBDocumentClient, ScanCommand, QueryCommand, BatchGetCommand } = r
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE = process.env.AGG_TABLE;
 
-// ============ MULTI-TIER CACHING STRATEGY ============
-// NOTE: Cache disabled - always scan fresh from DynamoDB
-// const FULL_CACHE_TTL_MS = 3_000;  // 3s - reduces DynamoDB scans by 90%+
-// const ITEM_CACHE_TTL_MS = 5_000;  // 5s - incremental updates
-// const PARTIAL_CACHE_TTL_MS = 500; // 500ms - recent timeline cache
-
-// let cachedMetrics = null;
-// let cacheExpiresAt = 0;
-// let cachedItems = null;
-// let itemsCacheExpiresAt = 0;
-// let lastItemHash = null;
-
-// ============ FAST ITEM FETCHING ============
-// Always scan fresh from DynamoDB - cache disabled
 async function fetchAllItemsFast() {
   try {
     // Always scan - no caching
@@ -37,19 +23,6 @@ async function fetchAllItemsFast() {
   }
 }
 
-// ============ DELTA DETECTION ============
-// NOTE: Delta detection disabled - always recalculate
-// function generateItemHash(items) {
-//   const hashes = items
-//     .map(i => `${i.id}:${i.total}:${i.revenue || 0}:${i.orders || 0}`)
-//     .join("|");
-//   return Math.abs(hashes.split("").reduce((a, b) => a * 31 + b.charCodeAt(0), 0)).toString(36);
-// }
-
-/**
- * Parse flat DynamoDB items into dashboard metrics.
- * Optimized for speed with early-exit conditions.
- */
 function parseItems(items = []) {
   const metrics = {
     totalEvents: 0,
@@ -181,8 +154,7 @@ exports.handler = async () => {
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
         "X-Items-Scanned": items.length,
-        "X-Scan-Duration-Ms": scanDuration,
-        "X-Cache": "DISABLED"
+        "X-Scan-Duration-Ms": scanDuration
       },
       body: metricsJson
     };

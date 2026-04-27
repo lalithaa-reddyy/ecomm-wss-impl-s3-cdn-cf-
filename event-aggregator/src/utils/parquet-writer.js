@@ -85,7 +85,7 @@ async function writeEventsToParquet(records, bucket, prefix, filename) {
       })
     );
 
-    console.log(`✅ Uploaded events to S3: s3://${bucket}/${s3Key} (${fileBuffer.length} bytes)`);
+    console.log(`Uploaded events to S3: s3://${bucket}/${s3Key} (${fileBuffer.length} bytes)`);
 
     return {
       success: true,
@@ -96,7 +96,7 @@ async function writeEventsToParquet(records, bucket, prefix, filename) {
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
-    console.error(`❌ Failed to write events to Parquet: ${error.message}`);
+    console.error(`Failed to write events to Parquet: ${error.message}`);
     console.error(`Stack: ${error.stack}`);
     // Don't throw - return error result instead
     return {
@@ -173,7 +173,7 @@ async function writeAggregationsToParquet(records, bucket, prefix, filename) {
     );
 
     console.log(
-      `✅ Uploaded aggregations to S3: s3://${bucket}/${s3Key} (${fileBuffer.length} bytes)`
+      `Uploaded aggregations to S3: s3://${bucket}/${s3Key} (${fileBuffer.length} bytes)`
     );
 
     return {
@@ -185,7 +185,7 @@ async function writeAggregationsToParquet(records, bucket, prefix, filename) {
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
-    console.error(`❌ Failed to write aggregations to Parquet: ${error.message}`);
+    console.error(`Failed to write aggregations to Parquet: ${error.message}`);
     console.error(`Stack: ${error.stack}`);
     // Don't throw - return error result instead
     return {
@@ -222,10 +222,10 @@ async function writeBatchToParquet(datasets, bucket) {
 
   try {
     const results = await Promise.all(uploadPromises);
-    console.log(`✅ Successfully uploaded ${results.length} Parquet files to S3`);
+    console.log(`Successfully uploaded ${results.length} Parquet files to S3`);
     return results;
   } catch (error) {
-    console.error(`❌ Batch upload failed: ${error.message}`);
+    console.error(`Batch upload failed: ${error.message}`);
     throw error;
   }
 }
