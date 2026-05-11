@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:GetRecords",
+        "kinesis:GetShardIterator",
+        "kinesis:DescribeStream",
+        "kinesis:DescribeStreamSummary",
+        "kinesis:ListStreams",
+        "kinesis:ListShards"
+      ],
+      "Resource": "arn:aws:kinesis:us-east-1:596430611165:stream/event-stream-pipeline"
+    }
+  ]
+}

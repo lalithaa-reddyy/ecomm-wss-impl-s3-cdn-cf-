@@ -1,0 +1,5 @@
+{
+  "action": "start",
+  "rate": 50000,
+  "disableTemporal": true
+}

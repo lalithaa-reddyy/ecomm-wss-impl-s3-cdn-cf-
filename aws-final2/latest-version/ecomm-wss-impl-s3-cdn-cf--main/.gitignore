@@ -1,0 +1,53 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AWS SAM
+.aws-sam/
+samconfig.toml.metadata.json
+
+# Temporary files
+*.tmp
+/tmp/
+
+# SAM build and deployment
+.aws-sam/
+.aws-sam-minimal/
+packaged.yaml
+*.zip
+samconfig.toml
+
+# Backups
+*.bak
+*.backup
+
+# Test files
+payload.json
+invoke-payload.json
+kinesis-test-event.json
+kinesis-test-response.json
+payload-b64.txt
