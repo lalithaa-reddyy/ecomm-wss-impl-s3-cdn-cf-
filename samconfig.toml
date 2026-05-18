@@ -1,0 +1,13 @@
+version=0.1
+
+[default.deploy.parameters]
+stack_name = "event-stream-pipeline"
+s3_prefix = "event-stream-pipeline"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+image_repositories = []
+parameter_overrides = "StreamShards=\"2\" AggTableName=\"event-stream-aggregations\""
+
+[default.global.parameters]
+region = "us-east-1"
