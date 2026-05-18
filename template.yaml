@@ -1,0 +1,962 @@
+﻿AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Event Stream Pipeline - Stage 1 Event Generator to Kinesis,
+  Stage 2 Aggregator to DynamoDB, Stage 3 Metrics Dashboard API
+
+Parameters:
+  StreamShards:
+    Type: Number
+    Default: 2
+    Description: Number of Kinesis stream shards
+
+  AggTableName:
+    Type: String
+    Default: ''
+    Description: DynamoDB table name for aggregations (leave empty to auto-generate)
+
+Conditions:
+  UseCustomTableName: !Not [!Equals [!Ref AggTableName, '']]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    MemorySize: 512
+    Timeout: 180
+
+Resources:
+
+  
+  # ========== FRONTEND HOSTING (S3 + CLOUDFRONT) ==========
+  # Generator Frontend (Start/Stop UI)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'my-generator-frontend-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}'
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-frontend-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+
+  # Dashboard Frontend (Metrics Visualization)
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'my-dashboard-frontend-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${DashboardBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}'
+
+  DashboardOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-dashboard-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DashboardDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: DashboardS3Origin
+            DomainName: !GetAtt DashboardBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt DashboardOAC.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: DashboardS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+
+  # ========== KINESIS STREAM ==========
+  EventStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: !Ref StreamShards
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+
+  # ========== DYNAMODB TABLE ==========
+  AggregationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !If [UseCustomTableName, !Ref AggTableName, !Sub 'agg-${AWS::AccountId}-${AWS::StackName}']
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  # Event Generator State Table - Tracks start/stop state
+  EventGeneratorStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: generatorId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: generatorId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+  # ========== S3 BUCKETS (Parquet storage for raw events and aggregations) ==========
+  RawEventsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'event-stream-raw-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldRawEvents
+            Status: Enabled
+            Prefix: raw-events/
+            ExpirationInDays: 90
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Prefix: raw-events/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: INTELLIGENT_TIERING
+
+  AggregationsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'event-stream-agg-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionOldAggregations
+            Status: Enabled
+            Prefix: aggregations/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+
+  # ========== SNS TOPIC ==========
+  AnomalyTopic:
+    Type: AWS::SNS::Topic
+
+  # ========== IAM ROLES ==========
+  EventGeneratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: KinesisWritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                Resource: !GetAtt EventStream.Arn
+        - PolicyName: DynamoDBStatePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EventGeneratorStateTable.Arn
+
+  AggregatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
+      Policies:
+        - PolicyName: KinesisReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListStreams
+                  - kinesis:ListShards
+                Resource: !GetAtt EventStream.Arn
+        - PolicyName: DynamoDBSNSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt AggregationTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AnomalyTopic
+        - PolicyName: S3FullAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - '*'
+        - PolicyName: WebSocketPushPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt WebSocketConnectionsTable.Arn
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  MetricsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt AggregationTable.Arn
+
+  # ========== API GATEWAY ==========
+  EventApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Api-Key,Authorization'"
+        AllowOrigin: "'*'"
+
+  # ========== STAGE 1: GENERATOR LAMBDA ==========
+  EventGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-generator/
+      Handler: app/handler.handler
+      Runtime: nodejs22.x
+      MemorySize: 1024
+      Timeout: 900
+      Role: !GetAtt EventGeneratorRole.Arn
+      Environment:
+        Variables:
+          STREAM_NAME: !Ref EventStream
+          STATE_TABLE: !Ref EventGeneratorStateTable
+      Events:
+        GenerateApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref EventApi
+            Path: /generate
+            Method: post
+
+  # ========== STAGE 2: AGGREGATOR LAMBDA ==========
+  AggregatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-aggregator/
+      Handler: src/handlers/stream.handler
+      MemorySize: 1024
+      Timeout: 60
+      Role: !GetAtt AggregatorRole.Arn
+      Environment:
+        Variables:
+          AGG_TABLE: !Ref AggregationTable
+          SNS_TOPIC_ARN: !Ref AnomalyTopic
+          RAW_BUCKET: !Sub 'event-stream-raw-${AWS::AccountId}-${AWS::Region}'
+          AGG_BUCKET: !Sub 'event-stream-agg-${AWS::AccountId}-${AWS::Region}'
+          DEPLOYMENT_ID: "2026-04-15-s3-parquet-ready"
+          CONNECTIONS_TABLE: !Ref WebSocketConnectionsTable
+          WEBSOCKET_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+      Events:
+        KinesisStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt EventStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 500
+            MaximumBatchingWindowInSeconds: 1
+            ParallelizationFactor: 10
+            MaximumRetryAttempts: 2
+            DestinationConfig:
+              OnFailure:
+                Type: SNS
+                Destination: !Ref AnomalyTopic
+
+  # ========== STAGE 3: METRICS LAMBDA ==========
+  MetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-aggregator/
+      Handler: src/handlers/metrics.handler
+      MemorySize: 512
+      Timeout: 10
+      EphemeralStorage:
+        Size: 1024
+      Role: !GetAtt MetricsRole.Arn
+      Environment:
+        Variables:
+          AGG_TABLE: !Ref AggregationTable
+      Events:
+        MetricsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref EventApi
+            Path: /stream
+            Method: get
+
+  # ========== CLOUDWATCH LOG GROUPS ==========
+  GeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EventGeneratorFunction}'
+      RetentionInDays: 7
+
+  AggregatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AggregatorFunction}'
+      RetentionInDays: 7
+
+  MetricsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${MetricsFunction}'
+      RetentionInDays: 7
+
+  # ========== WEBSOCKET API ==========
+  WebSocketConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: wsapi
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: '$request.body.action'
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      AutoDeploy: true
+
+  WebSocketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WebSocketConnectionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt WebSocketConnectionsTable.Arn
+
+  WebSocketMetricsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WebSocketMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt AggregationTable.Arn
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  WebSocketConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-aggregator/
+      Handler: src/handlers/ws-connect.handler
+      Role: !GetAtt WebSocketRole.Arn
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref WebSocketConnectionsTable
+
+  WebSocketDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-aggregator/
+      Handler: src/handlers/ws-disconnect.handler
+      Role: !GetAtt WebSocketRole.Arn
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref WebSocketConnectionsTable
+
+  WebSocketMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-aggregator/
+      Handler: src/handlers/ws-metrics.handler
+      Role: !GetAtt WebSocketMetricsRole.Arn
+      Environment:
+        Variables:
+          AGG_TABLE: !Ref AggregationTable
+
+  WebSocketConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketConnectFunction.Arn}/invocations'
+
+  WebSocketDisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketDisconnectFunction.Arn}/invocations'
+
+  WebSocketMetricsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketMetricsFunction.Arn}/invocations'
+
+  WebSocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebSocketConnectIntegration}'
+
+  WebSocketDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebSocketDisconnectIntegration}'
+
+  WebSocketMetricsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: getMetrics
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebSocketMetricsIntegration}'
+
+  WebSocketConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WebSocketConnectFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$connect'
+
+  WebSocketDisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WebSocketDisconnectFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$disconnect'
+
+  WebSocketMetricsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WebSocketMetricsFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/getMetrics'
+
+  # ========== WEBSOCKET PUSH (EventBridge Trigger) ==========
+  WebSocketPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WebSocketPushPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt WebSocketConnectionsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt AggregationTable.Arn
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  WebSocketPushFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-aggregator/src/handlers/
+      Handler: ws-push.handler
+      Runtime: nodejs22.x
+      MemorySize: 512
+      Timeout: 60
+      Role: !GetAtt WebSocketPushRole.Arn
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref WebSocketConnectionsTable
+          AGG_TABLE: !Ref AggregationTable
+          WEBSOCKET_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+      Events:
+        PushMetrics:
+          Type: Schedule
+          Properties:
+            Schedule: 'rate(1 minute)'
+
+  # ========== COGNITO AUTHENTICATION ==========
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: event-stream-users
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: false
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+
+  CognitoAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: event-stream-app
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # Create test user
+  TestUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Username: testuser
+      UserAttributes:
+        - Name: email
+          Value: test@example.com
+        - Name: email_verified
+          Value: 'true'
+      MessageAction: SUPPRESS
+
+  # Lambda to set user password
+  SetUserPasswordFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SetCognitoUserPassword
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt SetPasswordRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+
+          cognito = boto3.client('cognito-idp')
+
+          def handler(event, context):
+            try:
+              if event['RequestType'] == 'Delete':
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                return
+
+              props = event['ResourceProperties']
+              cognito.admin_set_user_password(
+                UserPoolId=props['UserPoolId'],
+                Username=props['Username'],
+                Password=props['Password'],
+                Permanent=True
+              )
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+              print(f"Error: {str(e)}")
+              cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  SetPasswordRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminSetUserPassword
+                Resource: !GetAtt CognitoUserPool.Arn
+
+  SetPasswordCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SetUserPasswordFunction.Arn
+      UserPoolId: !Ref CognitoUserPool
+      Username: testuser
+      Password: TestPassword123
+
+  # Cognito Authorizer for API Gateway
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      Type: COGNITO_USER_POOLS
+      ProviderARNs:
+        - !GetAtt CognitoUserPool.Arn
+      IdentitySource: method.request.header.Authorization
+      RestApiId: !Ref EventApi
+
+Outputs:
+  GeneratorApiEndpoint:
+    Description: Event Generator API endpoint
+    Value: !Sub 'https://${EventApi}.execute-api.${AWS::Region}.amazonaws.com/prod/generate'
+    Export:
+      Name: !Sub '${AWS::StackName}-GeneratorApi'
+
+  MetricsApiEndpoint:
+    Description: Dashboard Metrics API endpoint
+    Value: !Sub 'https://${EventApi}.execute-api.${AWS::Region}.amazonaws.com/prod/stream'
+    Export:
+      Name: !Sub '${AWS::StackName}-MetricsApi'
+
+  EventApiEndpoint:
+    Description: Full API Gateway base URL
+    Value: !Sub 'https://${EventApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiBase'
+
+  EventStreamName:
+    Description: Kinesis stream name
+    Value: !Ref EventStream
+    Export:
+      Name: !Sub '${AWS::StackName}-StreamName'
+
+  EventStreamArn:
+    Description: Kinesis stream ARN
+    Value: !GetAtt EventStream.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-StreamArn'
+
+  AggregationTableName:
+    Description: DynamoDB table name
+    Value: !Ref AggregationTable
+    Export:
+      Name: !Sub '${AWS::StackName}-AggTable'
+
+  AnomalyTopicArn:
+    Description: SNS topic ARN
+    Value: !Ref AnomalyTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AnomalyTopic'
+
+  GeneratorFunctionArn:
+    Description: Event Generator Lambda ARN
+    Value: !GetAtt EventGeneratorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GeneratorArn'
+
+  AggregatorFunctionArn:
+    Description: Event Aggregator Lambda ARN
+    Value: !GetAtt AggregatorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AggregatorArn'
+
+  RawEventsBucketName:
+    Description: S3 bucket for raw event data (Parquet format)
+    Value: !Ref RawEventsS3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-RawBucket'
+
+  AggregationsBucketName:
+    Description: S3 bucket for aggregated data (Parquet format)
+    Value: !Ref AggregationsS3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AggBucket'
+
+  MetricsFunctionArn:
+    Description: Metrics Lambda ARN
+    Value: !GetAtt MetricsFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MetricsArn'
+
+  FrontendBucketName:
+    Description: S3 bucket for generator frontend assets
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendBucket'
+
+  CloudFrontDomainName:
+    Description: CloudFront URL for generator (start/stop controls)
+    Value: !GetAtt FrontendDistribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontURL'
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID for generator (needed for cache invalidation)
+    Value: !Ref FrontendDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDistId'
+
+  DashboardBucketName:
+    Description: S3 bucket for dashboard frontend assets
+    Value: !Ref DashboardBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardBucket'
+
+  DashboardCloudFrontDomainName:
+    Description: CloudFront URL for dashboard (metrics visualization)
+    Value: !GetAtt DashboardDistribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardCloudFrontURL'
+
+  DashboardCloudFrontDistributionId:
+    Description: CloudFront distribution ID for dashboard (needed for cache invalidation)
+    Value: !Ref DashboardDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardCloudFrontDistId'
+
+  WebSocketEndpoint:
+    Description: WebSocket API endpoint (use as VITE_WS_ENDPOINT)
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketEndpoint'
+
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoUserPoolId'
+
+  CognitoClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoAppClient
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoClientId'
+
+  CognitoTestUserCredentials:
+    Description: Test user credentials for authentication
+    Value: 'Username: testuser | Password: TestPassword123'
+
