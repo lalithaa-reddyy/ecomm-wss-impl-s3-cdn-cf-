@@ -42,7 +42,9 @@ Wait for deployment to complete.
 ### Step 4: Access Your App
 
 AWS will output your CloudFront URLs. Copy and paste them in your browser.
-
+username:testuser
+password:TestPassword123
+sign in and start the generator, go to the dashboard to view the live updates
 Done! 
 
 ---
