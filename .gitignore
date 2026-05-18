@@ -39,7 +39,6 @@ samconfig.toml.metadata.json
 .aws-sam-minimal/
 packaged.yaml
 *.zip
-samconfig.toml
 
 # Backups
 *.bak
