@@ -176,7 +176,3 @@ if ($GENERATOR_DIST_DOMAIN) {
 if ($DASHBOARD_DIST_DOMAIN) {
     Write-Host "  Dashboard: https://$DASHBOARD_DIST_DOMAIN"
 }
-
-Write-Host "`nNext: Clear cache and refresh browser"
-Write-Host "  Run: .\clear-cache.ps1"
-Write-Host "`n=========================================="
