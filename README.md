@@ -27,7 +27,7 @@ Enter your:
 2. Extract it to your desired location
 3. Open PowerShell and navigate to the extracted folder:
 
-```bash
+```bash(ensure there are no white spaces in the path)
 cd path/to/ecomm-folder
 ```
 
@@ -36,6 +36,8 @@ cd path/to/ecomm-folder
 ```bash
 ./deploy-all.ps1
 ```
+if you face any error regarding deploy-all.ps1 not being digitally signed, run this command:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 Wait for deployment to complete.
 
