@@ -106,8 +106,13 @@ VITE_COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID
 VITE_COGNITO_REGION=us-east-1
 "@
 
+$frontendDir = Join-Path $PSScriptRoot "frontend"
+if (-not (Test-Path $frontendDir)) {
+    New-Item -ItemType Directory -Force -Path $frontendDir | Out-Null
+}
+
 $utf8 = New-Object System.Text.UTF8Encoding $false
-[System.IO.File]::WriteAllText((Join-Path "frontend" ".env"), $frontendContent, $utf8)
+[System.IO.File]::WriteAllText((Join-Path $frontendDir ".env"), $frontendContent, $utf8)
 Write-Host "  OK frontend/.env"
 
 Write-Host "`nStep 5: Updating Dashboard .env..." -ForegroundColor Blue
@@ -116,7 +121,12 @@ $dashboardContent = @"
 VITE_WS_ENDPOINT=$WS_ENDPOINT
 "@
 
-[System.IO.File]::WriteAllText((Join-Path "dashboard-frontend" ".env"), $dashboardContent, $utf8)
+$dashboardDir = Join-Path $PSScriptRoot "dashboard-frontend"
+if (-not (Test-Path $dashboardDir)) {
+    New-Item -ItemType Directory -Force -Path $dashboardDir | Out-Null
+}
+
+[System.IO.File]::WriteAllText((Join-Path $dashboardDir ".env"), $dashboardContent, $utf8)
 Write-Host "  OK dashboard-frontend/.env"
 
 Write-Host "`nStep 6: Building Frontend..." -ForegroundColor Blue
