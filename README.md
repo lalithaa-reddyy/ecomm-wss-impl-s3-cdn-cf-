@@ -27,7 +27,8 @@ Enter your:
 2. Extract it to your desired location
 3. Open PowerShell and navigate to the extracted folder:
 
-```bash(ensure there are no white spaces in the path)
+```bash
+(ensure there are no white spaces in the path)
 cd path/to/ecomm-folder
 ```
 
